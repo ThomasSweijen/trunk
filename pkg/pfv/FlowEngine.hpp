@@ -95,6 +95,8 @@ class TemplateFlowEngine : public PartialEngine
 		int retriangulationLastIter;
 		enum {wall_xmin, wall_xmax, wall_ymin, wall_ymax, wall_zmin, wall_zmax};
 		Vector3r normal [6];
+		bool updateSoluteEngine;
+		bool firstSoluteEngine;
 		bool currentTes;
 		bool metisForced;
 		int idOffset;
@@ -306,6 +308,8 @@ class TemplateFlowEngine : public PartialEngine
 		backgroundCompleted=true;
 		ellapsedIter=0;
 		metisForced=false;
+		updateSoluteEngine = false;
+		firstSoluteEngine = true;
 		,
 		.def("imposeFlux",&TemplateFlowEngine::imposeFlux,(python::arg("pos"),python::arg("p")),"Impose incoming flux in boundary cell of location 'pos'.")
 		.def("imposePressure",&TemplateFlowEngine::imposePressure,(python::arg("pos"),python::arg("p")),"Impose pressure in cell of location 'pos'. The index of the condition is returned (for multiple imposed pressures at different points).")

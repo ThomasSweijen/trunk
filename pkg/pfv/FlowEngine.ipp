@@ -65,7 +65,7 @@ void TemplateFlowEngine<_CellInfo,_VertexInfo,_Tesselation,solverT>::action()
 	retriangulationLastIter++;
 	if (!updateTriangulation) updateTriangulation = // If not already set true by another function of by the user, check conditions
 		(defTolerance>0 && epsVolCumulative > defTolerance) || retriangulationLastIter>meshUpdateInterval;
-
+	if (updateTriangulation){updateSoluteEngine=true;}
         ///compute flow and and forces here
 	if (pressureForce){
 		solver->gaussSeidel(scene->dt);

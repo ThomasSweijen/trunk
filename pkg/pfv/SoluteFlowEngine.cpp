@@ -8,13 +8,15 @@
 #ifdef YADE_CGAL
 #ifdef FLOW_ENGINE
 
-// #define SOLUTE_FLOW
+#define SOLUTE_FLOW
 #ifdef SOLUTE_FLOW
 
 #define TEMPLATE_FLOW_NAME SoluteFlowEngineT
 #include <yade/pkg/pfv/FlowEngine.hpp>
+#include<Eigen/SparseLU>
 
-#include <Eigen/Sparse>
+
+#undef TEMPLATE_FLOW_NAME
 
 class SoluteCellInfo : public FlowCellInfo
 {	
@@ -24,6 +26,7 @@ class SoluteCellInfo : public FlowCellInfo
 	inline Real& solute (void) {return solute_concentration;}
 	inline const Real& solute (void) const {return solute_concentration;}
 	inline void getInfo (const SoluteCellInfo& otherCellInfo) {FlowCellInfo::getInfo(otherCellInfo); solute()=otherCellInfo.solute();}
+	
 };
 
 typedef TemplateFlowEngine<SoluteCellInfo,FlowVertexInfo> SoluteFlowEngineT;
@@ -33,24 +36,44 @@ YADE_PLUGIN((SoluteFlowEngineT));
 class SoluteFlowEngine : public SoluteFlowEngineT
 {
 	public :
-		void initializeSoluteTransport();
-		void soluteTransport (double deltatime, double D);
+		
+	Eigen::SparseLU<Eigen::SparseMatrix<double,Eigen::ColMajor, int>, Eigen::AMDOrdering<int> > eSolver2;
+		
+	
+	
+		void SoluteAction();
+		void solveConcentration();
+		void InitializeSoluteTransport();
+		void solveSoluteTransportMatrix ();
 		double getConcentration(unsigned int id){return solver->T[solver->currentTes].cellHandles[id]->info().solute();	}
 		double insertConcentration(unsigned int id,double conc){
 			solver->T[solver->currentTes].cellHandles[id]->info().solute() = conc;
 			return conc;}
-		void soluteBC(unsigned int bc_id1, unsigned int bc_id2, double bc_concentration1, double bc_concentration2,unsigned int s);
+		void soluteBC();
 		double getConcentrationPlane (double Yobs,double Yr, int xyz);
 		///Elaborate the description as you wish
 		YADE_CLASS_BASE_DOC_ATTRS_INIT_CTOR_PY(SoluteFlowEngine,SoluteFlowEngineT,"A variant of :yref:`FlowEngine` with solute transport).",
 		///No additional variable yet, else input here
 // 		((Vector3r, gradP, Vector3r::Zero(),,"Macroscopic pressure gradient"))
-		,,,
-		.def("soluteTransport",&SoluteFlowEngine::soluteTransport,(python::arg("deltatime"),python::arg("D")),"Solute transport (advection and diffusion) engine for diffusion use a diffusion coefficient (D) other than 0.")
+       		((double,D,0.0,,"Controls the initialization/update phases"))
+		((unsigned int,bcid1,3,,"Boundary condition 1, enter the O.bodies identifyer of wall"))
+		((unsigned int,bcid2,2,,"Boundary condition 2, enter the O.bodies identifyer of wall (only required for diffusion)"))
+		((double,bcconcentration1,1.0,,"Concentration at boundary condition 1"))
+		((double,bcconcentration2,0.0,,"Concentration at boundary condition 2"))
+		((double,simulationdt,0.0,,"If dt in the simulation changes, coefficient matrix has to be decomposed again"))
+		((bool,MassStorage,false,,"How to store your data per pore, in mass (true) or volume (false)"))
+		,,
+		
+		,
+		
+		.def("solveSoluteTransportMatrix",&SoluteFlowEngine::solveSoluteTransportMatrix,"Solute transport (advection and diffusion) engine for diffusion use a diffusion coefficient (D) other than 0.")
 		.def("getConcentration",&SoluteFlowEngine::getConcentration,(python::arg("id")),"get concentration of pore with ID")
 		.def("insertConcentration",&SoluteFlowEngine::insertConcentration,(python::arg("id"),python::arg("conc")),"Insert Concentration (ID, Concentration)")
-		.def("solute_BC",&SoluteFlowEngine::soluteBC,(python::arg("bc_id1"),python::arg("bc_id2"),python::arg("bc_concentration1"),python::arg("bc_concentration2"),python::arg("s")),"Enter X,Y,Z for concentration observation'.")
-		//I guess there is getConcentrationPlane missing here, but it is not on github
+		.def("solute_BC",&SoluteFlowEngine::soluteBC,"Run Boundary Conditions")
+		.def("InitializeSoluteTransport",&SoluteFlowEngine::InitializeSoluteTransport,"Reset all concentrations in cells")
+		.def("solveConcentration",&SoluteFlowEngine::solveConcentration,"runSolver without recomputing")
+		.def("SoluteAction",&SoluteFlowEngine::SoluteAction,"runSolver without recomputing")
+		.def("getConcentrationPlane",&SoluteFlowEngine::getConcentrationPlane,(python::arg("Yobs"),python::arg("Yr"),python::arg("xyz")),"Measure concentration within a plane. Concentrations get weighted to their distance to the plane")
 		)
 };
 REGISTER_SERIALIZABLE(SoluteFlowEngine);
@@ -58,109 +81,171 @@ REGISTER_SERIALIZABLE(SoluteFlowEngine);
 
 // PeriodicFlowEngine::~PeriodicFlowEngine(){}
 
-void SoluteFlowEngine::initializeSoluteTransport ()
-{
-	//Prepare a list with concentrations in range of 0,nCells. Or resets the list of concentrations to 0
-// 	typedef typename Solver::element_type Flow;
-// 	typedef typename Flow::Finite_vertices_iterator Finite_vertices_iterator;
-// 	typedef typename Solver::element_type Flow;
 
+void SoluteFlowEngine::SoluteAction(){
+  bool local_debug = false;
+  
+  
+  //If this is the first computation, some preparation has to be done
+  if (firstSoluteEngine){
+      simulationdt = scene->dt;
+      InitializeSoluteTransport();
+      solveSoluteTransportMatrix();
+      firstSoluteEngine=false;
+      if(local_debug){cerr<<"First time in solute Engine!"<<endl;}
+  }
+  
+  //if dt has been changed, coefficient matrix is recomputed.
+  if(simulationdt != scene->dt){updateSoluteEngine = true;}
+  
+  //After triangulation, matrix has to be resolved
+  if(updateSoluteEngine){
+    solveSoluteTransportMatrix();
+    updateSoluteEngine=false;
+    if(local_debug){cerr<<"Matrix recomputed due to triangulation"<<endl;}
+  }
+  
+  //Normal calculation of concentration
+  soluteBC();
+  solveConcentration();
+  if(local_debug){cerr<<"Solved for concentration!"<<endl;}
+      
+      
+    
+}
+
+
+
+
+
+void SoluteFlowEngine::InitializeSoluteTransport ()
+{
+	//Fill the concentration list with 0.0
 	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles)
 	{
 	 cell->info().solute() = 0.0;
 	}
 }
 
-void SoluteFlowEngine::soluteTransport (double deltatime, double D)
-{
-	//soluteTransport is a function to solve transport of solutes for advection (+diffusion).
-	//Call this function with a pyRunner in the python script, implement a diffusion coefficient and a dt.
-	//  Optimalization has to be done such that the coefficient matrix is not solved for each time step,only after triangulation.
-	//  Extensive testing has to be done to check its ability to simulate a deforming porous media.
+void SoluteFlowEngine::solveConcentration(){
+	//Solve for concentration using the already solved coefficient matrix
+	int ncells=0;
+	ncells=solver->T[solver->currentTes].cellHandles.size();
+	Eigen::VectorXd eb2(ncells); Eigen::VectorXd ex2(ncells);
+  	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
+	       if(MassStorage == false){eb2[cell->info().id]=cell->info().solute();}
+	       if(MassStorage == true){
+		 eb2[cell->info().id]=cell->info().solute()*cell->info().invVoidVolume();
+	}
+	}
+	
+	ex2 = eSolver2.solve(eb2);
+    
+	
+	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
+	  
+	      if(MassStorage == false){cell->info().solute()= ex2[cell->info().id];}
+	      if(MassStorage == true){cell->info().solute()= ex2[cell->info().id]/cell->info().invVoidVolume();}
+		
+	}
+  
+}
+
+void SoluteFlowEngine::solveSoluteTransportMatrix()
+
+{	
+	//In this function the coefficient matrix is solved for advection and diffusion
+	//Definitions used for filling the matrix
 	double coeff = 0.00;
 	double coeff1 = 0.00;	//Coefficient for off-diagonal element
 	double coeff2 = 0.00;  //Coefficient for diagonal element
 	double qin = 0.00;	//Flux into the pore per pore throat 
 	double Qout=0.0;	//Total Flux out of the pore
-	int ncells = 0;		//Number of cells
+	int ncells;		//Number of cells
 	int ID = 0;
-	//double D = 0.0;
 	double invdistance = 0.0;	//Fluid facet area divided by pore throat length for each pore throat
 	double invdistancelocal = 0.0; //Sum of invdistance
 	ncells=solver->T[solver->currentTes].cellHandles.size();
-	
-	Eigen::SparseMatrix<double, Eigen::ColMajor> Aconc(ncells,ncells);
+
+	//Definitions for solving the matrix
+	Eigen::SparseMatrix<double, Eigen::ColMajor,int> Aconc;
 	typedef Eigen::Triplet<double> ETriplet2;
 	std::vector<ETriplet2> tripletList2;
-	Eigen::SparseLU<Eigen::SparseMatrix<double,Eigen::ColMajor>,Eigen::COLAMDOrdering<int> > eSolver2;	
+	Aconc.resize(ncells,ncells);
 
-	// Prepare (copy) concentration vector
-	Eigen::VectorXd eb2(ncells); Eigen::VectorXd ex2(ncells);
-	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
-	  eb2[cell->info().id]=cell->info().solute();
-	}
 		
 	// Fill coefficient matrix
+	
+	//Loop over all pores
 	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
 	cell->info().invVoidVolume() = 1 / ( abs(cell->info().volume()) - abs(solver->volumeSolidPore(cell) ) );
-	invdistance=0.0;
+		invdistance=0.0;
 	
 
-	unsigned int i=cell->info().id;
-	for (unsigned int ngb=0;ngb<4;ngb++){
-	  CGT::Point& p2 = cell ->neighbor(ngb)->info();
-	  CGT::Point& p1 = cell->info();
-	  CGT::CVector l = p1-p2;
-	  CGT::Real fluidSurf = sqrt(cell->info().facetSurfaces[ngb].squared_length())*cell->info().facetFluidSurfacesRatio[ngb];
-	  invdistancelocal = (fluidSurf/sqrt(l.squared_length()));
-	  invdistance+=(fluidSurf/sqrt(l.squared_length()));
-	  coeff = deltatime*cell->info().invVoidVolume();
-	      ID = cell->neighbor(ngb)->info().id;
-		 qin=abs(cell->info().kNorm() [ngb])* ( cell->neighbor ( ngb )->info().p()-cell->info().p());
-		 Qout=Qout+max(qin,0.0);
-		 coeff1=-1*coeff*(abs(max(qin,0.0))-(D*invdistancelocal));
-		 if (coeff1 != 0.0){
-		 tripletList2.push_back(ETriplet2(i,ID,coeff1));
-		 }
-	 
-	}
-	coeff2=1.0+(coeff*abs(Qout))+(coeff*D*invdistance);
-	tripletList2.push_back(ETriplet2(i,i,coeff2));
-	Qout=0.0;
+		//loop over all neighbors of a pore
+		unsigned int i=cell->info().id;
+		for (unsigned int ngb=0;ngb<4;ngb++){
+	  
+	  //Calculate distance, facet area between two pores
+		      CGT::Point& p2 = cell ->neighbor(ngb)->info();
+		      CGT::Point& p1 = cell->info();
+		      CGT::CVector l = p1-p2;
+		      CGT::Real fluidSurf = sqrt(cell->info().facetSurfaces[ngb].squared_length())*cell->info().facetFluidSurfacesRatio[ngb];
+		      invdistancelocal = (fluidSurf/sqrt(l.squared_length()));
+		      invdistance+=(fluidSurf/sqrt(l.squared_length()));
+		      
+		      //Fill off-diagonal coefficients
+		      coeff = scene->dt*cell->info().invVoidVolume();
+		      ID = cell->neighbor(ngb)->info().id;
+		      qin=abs(cell->info().kNorm() [ngb])* ( cell->neighbor ( ngb )->info().p()-cell->info().p());
+		      Qout=Qout+max(qin,0.0);
+		      coeff1=-1*coeff*(abs(max(qin,0.0))-(D*invdistancelocal));
+		      if (coeff1 != 0.0){
+			  tripletList2.push_back(ETriplet2(i,ID,coeff1));
+		      }
+	      }
+	      //Fill diagonal coefficients
+	      coeff2=1.0+(coeff*abs(Qout))+(coeff*D*invdistance);
+	      if (coeff2 != 0.0){
+		tripletList2.push_back(ETriplet2(i,i,coeff2));
+	      }
+
+	      Qout=0.0;
+	      qin=0.0;
 	}   
-	    //Solve Matrix
-	    Aconc.setFromTriplets(tripletList2.begin(), tripletList2.end());
-	    //if (eSolver2.signDeterminant() < 1){cerr << "determinant is negative!!!!!!! " << eSolver2.signDeterminant()<<endl;}
-	    //eSolver2.setPivotThreshold(10e-8);
-	    eSolver2.analyzePattern(Aconc); 						
-	    eSolver2.factorize(Aconc); 						
-	    eSolver2.compute(Aconc);
-	    ex2 = eSolver2.solve(eb2);
-	    
-	    
-	    double averageConc = 0.0;
-	    FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
-	    averageConc+=cell->info().solute();}
-	    
-	    //Copy data to concentration array
-	    FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
-		cell->info().solute()= ex2[cell->info().id];
-	    }
-	    tripletList2.clear();
-	    
+	
+	//Solve the coefficient Matrix
+	Aconc.setFromTriplets(tripletList2.begin(), tripletList2.end());
+	Aconc.makeCompressed();
+	eSolver2.compute(Aconc);
+	tripletList2.clear();
   }
 
-void SoluteFlowEngine::soluteBC(unsigned int bcid1, unsigned int bcid2, double bcconcentration1, double bcconcentration2, unsigned int s)
+  
+void SoluteFlowEngine::soluteBC()
 {
 	//Boundary conditions according to soluteTransport.
 	//It simply assigns boundary concentrations to cells with a common vertices (e.g. infinite large sphere which makes up the boundary condition in flowEngine)
-	//s is a switch, if 0 only bc_id1 is used (advection only). If >0 than both bc_id1 and bc_id2 are used. 
+	//Diffusion requires two boundary conditions whereas advection only requires one!
 	//NOTE (bruno): cell cirulators can be use to get all cells having bcid2 has a vertex more efficiently (see e.g. FlowBoundingSphere.ipp:721)
     	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles)
 	{
 		for (unsigned int ngb=0;ngb<4;ngb++){ 
-			if (cell->vertex(ngb)->info().id() == bcid1){cell->info().solute() = bcconcentration1;}
-			if (s > 0){if (cell->vertex(ngb)->info().id() == bcid2){cell->info().solute() = bcconcentration2;}}
+			if (cell->vertex(ngb)->info().id() == bcid1){
+			  if(MassStorage == false){cell->info().solute() = bcconcentration1;}
+			  if(MassStorage == true){cell->info().solute() = bcconcentration1/cell->info().invVoidVolume();}
+			  
+			  
+			}
+			  
+			  
+			if (D != 0){if (cell->vertex(ngb)->info().id() == bcid2){
+			  if(MassStorage == false){ cell->info().solute() = bcconcentration2;}
+			  if(MassStorage == true){cell->info().solute() = bcconcentration2/cell->info().invVoidVolume();}
+			 
+			  
+			  
+			}}
 		}
 	}
 }
@@ -180,8 +265,13 @@ double SoluteFlowEngine::getConcentrationPlane (double Yobs,double Yr, int xyz)
 	CGT::Point& p1 = cell->info();
 	if (abs(p1[xyz]) < abs(abs(Yobs) + abs(Yr))){
 	  if(abs(p1[xyz]) > abs(abs(Yobs) - abs(Yr))){
-	    sumConcentration += cell->info().solute()*(1-(abs(p1[xyz])-abs(Yobs))/abs(Yr));
-	    sumFraction += (1-(abs(p1[xyz])-abs(Yobs))/abs(Yr));
+	      if(MassStorage == false){	   
+		sumConcentration += cell->info().solute()*(1-(abs(p1[xyz])-abs(Yobs))/abs(Yr));
+		sumFraction += (1-(abs(p1[xyz])-abs(Yobs))/abs(Yr));}
+		if(MassStorage == true){	   
+		sumConcentration += cell->info().solute()*cell->info().invVoidVolume()*(1-(abs(p1[xyz])-abs(Yobs))/abs(Yr));
+		sumFraction += (1-(abs(p1[xyz])-abs(Yobs))/abs(Yr));}
+		
 	}
 	}
 	}
