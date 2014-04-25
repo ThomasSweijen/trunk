@@ -404,7 +404,7 @@ void TemplateFlowEngine<_CellInfo,_VertexInfo,_Tesselation,solverT>::initializeV
 			case ( 3 ) : cell->info().volume() = volumeCellTripleFictious ( cell ); break;
 			default: break; 
 		}
-		if (flow.fluidBulkModulus>0) { cell->info().invVoidVolume() = 1 / ( abs(cell->info().volume()) - flow.volumeSolidPore(cell) ); }
+		if (flow.fluidBulkModulus>0 ||doInterpolate) { cell->info().invVoidVolume() = 1 / ( abs(cell->info().volume()) - flow.volumeSolidPore(cell) ); }
 	}
 	if (debug) cout << "Volumes initialised." << endl;
 }

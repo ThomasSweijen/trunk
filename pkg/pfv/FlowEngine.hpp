@@ -95,7 +95,6 @@ class TemplateFlowEngine : public PartialEngine
 		int retriangulationLastIter;
 		enum {wall_xmin, wall_xmax, wall_ymin, wall_ymax, wall_zmin, wall_zmax};
 		Vector3r normal [6];
-		bool updateSoluteEngine;
 		bool firstSoluteEngine;
 		bool currentTes;
 		bool metisForced;
@@ -290,6 +289,8 @@ class TemplateFlowEngine : public PartialEngine
 		((bool, viscousNormalBodyStress, false,,"compute normal viscous stress applied on each body"))
 		((bool, viscousShearBodyStress, false,,"compute shear viscous stress applied on each body"))
 		((bool, multithread, false,,"Build triangulation and factorize in the background (multi-thread mode)"))
+		((bool, updateSoluteEngine,false,,"Update solute engine independent from triangulation"))
+
 		#ifdef EIGENSPARSE_LIB
 		((int, numSolveThreads, 1,,"number of openblas threads in the solve phase."))
 		((int, numFactorizeThreads, 1,,"number of openblas threads in the factorization phase"))
@@ -311,7 +312,6 @@ class TemplateFlowEngine : public PartialEngine
 		backgroundCompleted=true;
 		ellapsedIter=0;
 		metisForced=false;
-		updateSoluteEngine = false;
 		firstSoluteEngine = true;
 		,
 		.def("imposeFlux",&TemplateFlowEngine::imposeFlux,(python::arg("pos"),python::arg("p")),"Impose incoming flux in boundary cell of location 'pos'.")

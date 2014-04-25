@@ -55,12 +55,12 @@ class SoluteFlowEngine : public SoluteFlowEngineT
 		YADE_CLASS_BASE_DOC_ATTRS_INIT_CTOR_PY(SoluteFlowEngine,SoluteFlowEngineT,"A variant of :yref:`FlowEngine` with solute transport).",
 		///No additional variable yet, else input here
 // 		((Vector3r, gradP, Vector3r::Zero(),,"Macroscopic pressure gradient"))
-       		((double,D,0.0,,"Controls the initialization/update phases"))
-		((unsigned int,bcid1,3,,"Boundary condition 1, enter the O.bodies identifyer of wall"))
+       		((double,D,0.0,,"Diffusion coefficient, if 0 no diffusion is considered"))
+		((unsigned int,bcid1,3,,"Boundary condition 1, enter the O.bodies identifyer of wall, at the upstream side"))
 		((unsigned int,bcid2,2,,"Boundary condition 2, enter the O.bodies identifyer of wall (only required for diffusion)"))
 		((double,bcconcentration1,1.0,,"Concentration at boundary condition 1"))
 		((double,bcconcentration2,0.0,,"Concentration at boundary condition 2"))
-		((double,simulationdt,0.0,,"If dt in the simulation changes, coefficient matrix has to be decomposed again"))
+		((double,initialConcentration,0.0,,"The initial solute concentration found over the whole domain"))
 		((bool,MassStorage,false,,"How to store your data per pore, in mass (true) or volume (false)"))
 		,,
 		
@@ -88,18 +88,16 @@ void SoluteFlowEngine::SoluteAction(){
   
   //If this is the first computation, some preparation has to be done
   if (firstSoluteEngine){
-      simulationdt = scene->dt;
       InitializeSoluteTransport();
       solveSoluteTransportMatrix();
       firstSoluteEngine=false;
       if(local_debug){cerr<<"First time in solute Engine!"<<endl;}
   }
   
-  //if dt has been changed, coefficient matrix is recomputed.
-  if(simulationdt != scene->dt){updateSoluteEngine = true;}
   
   //After triangulation, matrix has to be resolved
   if(updateSoluteEngine){
+    updateVolumes ( *solver );	//NOTE This function updates info()->volume(), and info()->dv(), which is required for getting info()->invvoid()
     solveSoluteTransportMatrix();
     updateSoluteEngine=false;
     if(local_debug){cerr<<"Matrix recomputed due to triangulation"<<endl;}
@@ -123,7 +121,7 @@ void SoluteFlowEngine::InitializeSoluteTransport ()
 	//Fill the concentration list with 0.0
 	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles)
 	{
-	 cell->info().solute() = 0.0;
+	 cell->info().solute() = initialConcentration;
 	}
 }
 
@@ -133,22 +131,12 @@ void SoluteFlowEngine::solveConcentration(){
 	ncells=solver->T[solver->currentTes].cellHandles.size();
 	Eigen::VectorXd eb2(ncells); Eigen::VectorXd ex2(ncells);
   	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
-	       if(MassStorage == false){eb2[cell->info().id]=cell->info().solute();}
-	       if(MassStorage == true){
-		 eb2[cell->info().id]=cell->info().solute()*cell->info().invVoidVolume();
-	}
-	}
+	eb2[cell->info().id]=cell->info().solute();}
 	
 	ex2 = eSolver2.solve(eb2);
     
-	
-	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
-	  
-	      if(MassStorage == false){cell->info().solute()= ex2[cell->info().id];}
-	      if(MassStorage == true){cell->info().solute()= ex2[cell->info().id]/cell->info().invVoidVolume();}
-		
-	}
-  
+	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){ 
+	cell->info().solute()= ex2[cell->info().id]; 	}
 }
 
 void SoluteFlowEngine::solveSoluteTransportMatrix()
@@ -178,7 +166,8 @@ void SoluteFlowEngine::solveSoluteTransportMatrix()
 	
 	//Loop over all pores
 	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
-	cell->info().invVoidVolume() = 1 / ( abs(cell->info().volume()) - abs(solver->volumeSolidPore(cell) ) );
+	cell->info().invVoidVolume() = 1.0 / ( abs(cell->info().volume()) - abs(solver->volumeSolidPore(cell) ) );
+	if (cell->info().id == 10){cerr<<endl<<cell->info().invVoidVolume();}
 		invdistance=0.0;
 	
 
@@ -216,7 +205,6 @@ void SoluteFlowEngine::solveSoluteTransportMatrix()
 	
 	//Solve the coefficient Matrix
 	Aconc.setFromTriplets(tripletList2.begin(), tripletList2.end());
-	Aconc.makeCompressed();
 	eSolver2.compute(Aconc);
 	tripletList2.clear();
   }
@@ -232,19 +220,10 @@ void SoluteFlowEngine::soluteBC()
 	{
 		for (unsigned int ngb=0;ngb<4;ngb++){ 
 			if (cell->vertex(ngb)->info().id() == bcid1){
-			  if(MassStorage == false){cell->info().solute() = bcconcentration1;}
-			  if(MassStorage == true){cell->info().solute() = bcconcentration1/cell->info().invVoidVolume();}
-			  
-			  
+			  cell->info().solute() = bcconcentration1;
 			}
-			  
-			  
 			if (D != 0){if (cell->vertex(ngb)->info().id() == bcid2){
-			  if(MassStorage == false){ cell->info().solute() = bcconcentration2;}
-			  if(MassStorage == true){cell->info().solute() = bcconcentration2/cell->info().invVoidVolume();}
-			 
-			  
-			  
+			cell->info().solute() = bcconcentration2;			  
 			}}
 		}
 	}
@@ -265,13 +244,8 @@ double SoluteFlowEngine::getConcentrationPlane (double Yobs,double Yr, int xyz)
 	CGT::Point& p1 = cell->info();
 	if (abs(p1[xyz]) < abs(abs(Yobs) + abs(Yr))){
 	  if(abs(p1[xyz]) > abs(abs(Yobs) - abs(Yr))){
-	      if(MassStorage == false){	   
 		sumConcentration += cell->info().solute()*(1-(abs(p1[xyz])-abs(Yobs))/abs(Yr));
-		sumFraction += (1-(abs(p1[xyz])-abs(Yobs))/abs(Yr));}
-		if(MassStorage == true){	   
-		sumConcentration += cell->info().solute()*cell->info().invVoidVolume()*(1-(abs(p1[xyz])-abs(Yobs))/abs(Yr));
-		sumFraction += (1-(abs(p1[xyz])-abs(Yobs))/abs(Yr));}
-		
+		sumFraction += (1-(abs(p1[xyz])-abs(Yobs))/abs(Yr));	
 	}
 	}
 	}
