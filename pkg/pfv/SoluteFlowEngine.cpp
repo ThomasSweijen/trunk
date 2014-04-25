@@ -39,8 +39,6 @@ class SoluteFlowEngine : public SoluteFlowEngineT
 		
 	Eigen::SparseLU<Eigen::SparseMatrix<double,Eigen::ColMajor, int>, Eigen::AMDOrdering<int> > eSolver2;
 		
-	
-	
 		void SoluteAction();
 		void solveConcentration();
 		void InitializeSoluteTransport();
@@ -51,6 +49,9 @@ class SoluteFlowEngine : public SoluteFlowEngineT
 			return conc;}
 		void soluteBC();
 		double getConcentrationPlane (double Yobs,double Yr, int xyz);
+		double checkMassBalance();
+		double massIntegrationStorage();
+		void massIntegrationBC();
 		///Elaborate the description as you wish
 		YADE_CLASS_BASE_DOC_ATTRS_INIT_CTOR_PY(SoluteFlowEngine,SoluteFlowEngineT,"A variant of :yref:`FlowEngine` with solute transport).",
 		///No additional variable yet, else input here
@@ -62,10 +63,16 @@ class SoluteFlowEngine : public SoluteFlowEngineT
 		((double,bcconcentration2,0.0,,"Concentration at boundary condition 2"))
 		((double,initialConcentration,0.0,,"The initial solute concentration found over the whole domain"))
 		((bool,MassStorage,false,,"How to store your data per pore, in mass (true) or volume (false)"))
+		((double,totalmassBCin,0.0,,"total mass which entered via the boundary conditions."))
+		((double,totalmassBCout,0.0,,"total mass which left via the boundary conditions."))
+		((double,massinBC,0.0,,"Mass present in BC pores"))
+		((bool,MassIntegration,true,,"Switch for keeping track of mass flux into the system"))
 		,,
 		
 		,
-		
+		.def("checkMassBalance",&SoluteFlowEngine::checkMassBalance,"Returns the ratio of mass in system - mass went in via boundary over mass in system in %")
+		.def("massIntegrationStorage",&SoluteFlowEngine::massIntegrationStorage,"Mass balance check: integration of mass in the system")
+		.def("massIntegrationBC",&SoluteFlowEngine::massIntegrationBC,"Mass balance check: integration of mass in the system")
 		.def("solveSoluteTransportMatrix",&SoluteFlowEngine::solveSoluteTransportMatrix,"Solute transport (advection and diffusion) engine for diffusion use a diffusion coefficient (D) other than 0.")
 		.def("getConcentration",&SoluteFlowEngine::getConcentration,(python::arg("id")),"get concentration of pore with ID")
 		.def("insertConcentration",&SoluteFlowEngine::insertConcentration,(python::arg("id"),python::arg("conc")),"Insert Concentration (ID, Concentration)")
@@ -83,15 +90,15 @@ REGISTER_SERIALIZABLE(SoluteFlowEngine);
 
 
 void SoluteFlowEngine::SoluteAction(){
-  bool local_debug = false;
-  
+  bool localDebug = false;
+
   
   //If this is the first computation, some preparation has to be done
   if (firstSoluteEngine){
       InitializeSoluteTransport();
       solveSoluteTransportMatrix();
       firstSoluteEngine=false;
-      if(local_debug){cerr<<"First time in solute Engine!"<<endl;}
+      if(localDebug){cerr<<"First time in solute Engine!"<<endl;}
   }
   
   
@@ -100,13 +107,14 @@ void SoluteFlowEngine::SoluteAction(){
     updateVolumes ( *solver );	//NOTE This function updates info()->volume(), and info()->dv(), which is required for getting info()->invvoid()
     solveSoluteTransportMatrix();
     updateSoluteEngine=false;
-    if(local_debug){cerr<<"Matrix recomputed due to triangulation"<<endl;}
+    if(localDebug){cerr<<"Matrix recomputed due to triangulation"<<endl;}
   }
   
   //Normal calculation of concentration
   soluteBC();
+  if(MassIntegration){massIntegrationBC();}
   solveConcentration();
-  if(local_debug){cerr<<"Solved for concentration!"<<endl;}
+  if(localDebug){cerr<<"Solved for concentration!"<<endl;}
       
       
     
@@ -194,7 +202,7 @@ void SoluteFlowEngine::solveSoluteTransportMatrix()
 		      }
 	      }
 	      //Fill diagonal coefficients
-	      coeff2=1.0+(coeff*abs(Qout))+(coeff*D*invdistance);
+	      coeff2=1.0+(cell->info().dv()*scene->dt*cell->info().invVoidVolume())+coeff*(abs(Qout)+(D*invdistance));
 	      if (coeff2 != 0.0){
 		tripletList2.push_back(ETriplet2(i,i,coeff2));
 	      }
@@ -216,6 +224,9 @@ void SoluteFlowEngine::soluteBC()
 	//It simply assigns boundary concentrations to cells with a common vertices (e.g. infinite large sphere which makes up the boundary condition in flowEngine)
 	//Diffusion requires two boundary conditions whereas advection only requires one!
 	//NOTE (bruno): cell cirulators can be use to get all cells having bcid2 has a vertex more efficiently (see e.g. FlowBoundingSphere.ipp:721)
+	
+	
+	  
     	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles)
 	{
 		for (unsigned int ngb=0;ngb<4;ngb++){ 
@@ -225,8 +236,10 @@ void SoluteFlowEngine::soluteBC()
 			if (D != 0){if (cell->vertex(ngb)->info().id() == bcid2){
 			cell->info().solute() = bcconcentration2;			  
 			}}
+			  
 		}
 	}
+	
 }
 
 double SoluteFlowEngine::getConcentrationPlane (double Yobs,double Yr, int xyz)
@@ -252,6 +265,73 @@ double SoluteFlowEngine::getConcentrationPlane (double Yobs,double Yr, int xyz)
       concentration = sumConcentration / sumFraction;
       return concentration;
 }
+
+double SoluteFlowEngine::checkMassBalance()
+{
+  double percentage = 0.0;
+  double temp = 0.0;
+  temp = massIntegrationStorage() - massinBC + totalmassBCout;
+  percentage = 100.00*(temp - totalmassBCin)/temp;
+  return percentage;
+}
+
+
+void SoluteFlowEngine::massIntegrationBC()
+{    	
+  bool alreadydone = false; 
+  double masstotalin = 0.0;
+  double masstotalout = 0.0;
+  double flux=0.0;
+  double fluxout = 0.0;
+  double qin = 0.0;
+  double q = 0.0;
+  massinBC = 0.0;
+  FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles)
+	{
+	for (unsigned int vertexngb=0;vertexngb<4;vertexngb++){ 
+	if (cell->vertex(vertexngb)->info().id() == bcid1 && alreadydone == false){
+			 massinBC += bcconcentration1*(abs(cell->info().volume()) - abs(solver->volumeSolidPore(cell)));
+			 for (unsigned int ngb=0;ngb<4;ngb++){
+			 q = (cell->info().kNorm() [ngb])* ( cell->neighbor ( ngb )->info().p()-cell->info().p());
+			 qin=abs(min(0.0,q));
+			 flux += qin*cell->info().solute()*scene->dt;
+			 }
+			 alreadydone = true;
+			
+	}
+	if (cell->vertex(vertexngb)->info().id() == bcid2 && alreadydone == false){
+			 for (unsigned int ngb=0;ngb<4;ngb++){
+			 q = (cell->info().kNorm() [ngb])* ( cell->neighbor ( ngb )->info().p()-cell->info().p());
+			 qin=abs(max(0.0,q));
+			 fluxout += qin*cell->neighbor (ngb)->info().solute()*scene->dt;
+			 }
+			 alreadydone = true;
+	
+	}
+	}
+	alreadydone=false;
+	masstotalin +=flux;
+	masstotalout += fluxout;
+	flux = 0.0;
+	fluxout = 0.0;
+	}
+	totalmassBCin += masstotalin;
+	totalmassBCout += masstotalout;
+	//cerr << endl << "in "<< totalmassBCin <<"out "<<totalmassBCout << "total "<<massIntegrationStorage();
+	
+}	
+
+double SoluteFlowEngine::massIntegrationStorage()
+{
+  double mass = 0.0;
+  FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles)
+	{
+	 mass += cell->info().solute()*(abs(cell->info().volume()) - abs(solver->volumeSolidPore(cell)));
+	}
+  return mass;
+}
+
+
 
 YADE_PLUGIN ( ( SoluteFlowEngine ) );
 
