@@ -196,6 +196,13 @@ class TemplateFlowEngine : public PartialEngine
 		double getPorePressure(Vector3r pos){return solver->getPorePressure(pos[0], pos[1], pos[2]);}
 		int getCell(double posX, double posY, double posZ){return solver->getCell(posX, posY, posZ);}
 		unsigned int nCells(){return solver->T[solver->currentTes].cellHandles.size();}
+		python::list getNeighboringCells(unsigned int id){
+		  python::list ids;
+		  if (id>=solver->T[solver->currentTes].cellHandles.size()) {LOG_ERROR("id out of range, max value is "<<solver->T[solver->currentTes].cellHandles.size()); return ids;}			
+		  for (unsigned int i=0;i<4;i++) ids.append(solver->T[solver->currentTes].cellHandles[id]->neighbor(i)->info().id);
+		  return ids;
+		}
+		
 		python::list getVertices(unsigned int id){
 			python::list ids;
 			if (id>=solver->T[solver->currentTes].cellHandles.size()) {LOG_ERROR("id out of range, max value is "<<solver->T[solver->currentTes].cellHandles.size()); return ids;}			
@@ -348,6 +355,8 @@ class TemplateFlowEngine : public PartialEngine
 		.def("getCell",&TemplateFlowEngine::getCell,(python::arg("pos")),"get id of the cell containing (X,Y,Z).")
 		.def("nCells",&TemplateFlowEngine::nCells,"get the total number of finite cells in the triangulation.")
 		.def("getVertices",&TemplateFlowEngine::getVertices,(python::arg("id")),"get the vertices of a cell")
+		.def("getNeighboringCells",&TemplateFlowEngine::getNeighboringCells,(python::arg("id")),"get the neighbor of cell")
+		
 		#ifdef LINSOLV
 		.def("exportMatrix",&TemplateFlowEngine::exportMatrix,(python::arg("filename")="matrix"),"Export system matrix to a file with all entries (even zeros will displayed).")
 		.def("exportTriplets",&TemplateFlowEngine::exportTriplets,(python::arg("filename")="triplets"),"Export system matrix to a file with only non-zero entries.")

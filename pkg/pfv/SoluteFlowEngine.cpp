@@ -66,7 +66,11 @@ class SoluteFlowEngine : public SoluteFlowEngineT
 		((double,totalmassBCin,0.0,,"total mass which entered via the boundary conditions."))
 		((double,totalmassBCout,0.0,,"total mass which left via the boundary conditions."))
 		((double,massinBC,0.0,,"Mass present in BC pores"))
+		((int,nrOutlet,0,,"nr of imaginary outlets"))
 		((bool,MassIntegration,true,,"Switch for keeping track of mass flux into the system"))
+		((bool,bcid2s,false,,"Switch for switching bcid2 on or off"))
+		((bool,neumannOutlet,false,,"Use a neumann outlet yes or no?"))
+		
 		,,
 		
 		,
@@ -125,24 +129,41 @@ void SoluteFlowEngine::SoluteAction(){
 
 
 void SoluteFlowEngine::InitializeSoluteTransport ()
-{
+{	
+      double qout = 0.0;
+      bool alreadydone=false;
 	//Fill the concentration list with 0.0
 	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles)
 	{
 	 cell->info().solute() = initialConcentration;
+	 		for (unsigned int ngbvertex=0;ngbvertex<4;ngbvertex++){ 
+			if (cell->vertex(ngbvertex)->info().id() == bcid1 && alreadydone==false){
+			    for (unsigned int ngb=0;ngb<4;ngb++){
+			    qout+=min(0.0,(abs(cell->info().kNorm() [ngb])* ( cell->neighbor ( ngb )->info().p()-cell->info().p())));   
+			    alreadydone=true;
+			    }
 	}
+	}
+	alreadydone=false;
+	}
+	cerr << endl << "Total Flux out = "<<qout;
 }
 
 void SoluteFlowEngine::solveConcentration(){
 	//Solve for concentration using the already solved coefficient matrix
 	int ncells=0;
+	int a=0;
 	ncells=solver->T[solver->currentTes].cellHandles.size();
-	Eigen::VectorXd eb2(ncells); Eigen::VectorXd ex2(ncells);
+	if(neumannOutlet==false){a = ncells;}
+	if(neumannOutlet==true){a = ncells+nrOutlet;}
+	Eigen::VectorXd eb2(a); Eigen::VectorXd ex2(a);
+
   	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
 	eb2[cell->info().id]=cell->info().solute();}
+	if(neumannOutlet==true){for (unsigned int i = ncells; i < (ncells+nrOutlet);i++){eb2[i] = 0.0;}}
 	
 	ex2 = eSolver2.solve(eb2);
-    
+	//if(neumannOutlet==true){for (unsigned int i = ncells; i < (ncells+nrOutlet);i++){cerr << endl << i << "conc is "<<ex2[i];}}
 	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){ 
 	cell->info().solute()= ex2[cell->info().id]; 	}
 }
@@ -152,12 +173,15 @@ void SoluteFlowEngine::solveSoluteTransportMatrix()
 {	
 	//In this function the coefficient matrix is solved for advection and diffusion
 	//Definitions used for filling the matrix
+
+	bool alreadydone = false;
 	double coeff = 0.00;
 	double coeff1 = 0.00;	//Coefficient for off-diagonal element
 	double coeff2 = 0.00;  //Coefficient for diagonal element
 	double qin = 0.00;	//Flux into the pore per pore throat 
 	double Qout=0.0;	//Total Flux out of the pore
-	int ncells;		//Number of cells
+	int outletcount = 0;
+	int ncells = 0;		//Number of cells
 	int ID = 0;
 	double invdistance = 0.0;	//Fluid facet area divided by pore throat length for each pore throat
 	double invdistancelocal = 0.0; //Sum of invdistance
@@ -167,15 +191,28 @@ void SoluteFlowEngine::solveSoluteTransportMatrix()
 	Eigen::SparseMatrix<double, Eigen::ColMajor,int> Aconc;
 	typedef Eigen::Triplet<double> ETriplet2;
 	std::vector<ETriplet2> tripletList2;
-	Aconc.resize(ncells,ncells);
+	
+	//Get nr of outlet cells
+	nrOutlet = 0;
+	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
+	  for (unsigned int ngbvertex = 0; ngbvertex<4;ngbvertex++){
+	  if(cell->vertex(ngbvertex)->info().id() == bcid2){
+	  nrOutlet += 1;  
+	  }   
+	}
+	}
+	
+	if(neumannOutlet == true){Aconc.resize(ncells+nrOutlet,ncells+nrOutlet);}
+	if(neumannOutlet == false){Aconc.resize(ncells,ncells);}
 
 		
 	// Fill coefficient matrix
+
 	
 	//Loop over all pores
 	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
 	cell->info().invVoidVolume() = 1.0 / ( abs(cell->info().volume()) - abs(solver->volumeSolidPore(cell) ) );
-	if (cell->info().id == 10){cerr<<endl<<cell->info().invVoidVolume();}
+	//if (cell->info().id == 10){cerr<<endl<<cell->info().invVoidVolume();}
 		invdistance=0.0;
 	
 
@@ -202,14 +239,36 @@ void SoluteFlowEngine::solveSoluteTransportMatrix()
 		      }
 	      }
 	      //Fill diagonal coefficients
-	      coeff2=1.0+(cell->info().dv()*scene->dt*cell->info().invVoidVolume())+coeff*(abs(Qout)+(D*invdistance));
+	      coeff2=1.0+(cell->info().dv()*scene->dt*cell->info().invVoidVolume())+coeff*(abs(Qout)+(D*invdistance));		
 	      if (coeff2 != 0.0){
 		tripletList2.push_back(ETriplet2(i,i,coeff2));
 	      }
 
 	      Qout=0.0;
 	      qin=0.0;
-	}   
+	}
+	// Add neumann boundary condition, using additional pores connected via one pore to the pores at the outflux boundary. They are represented 
+	// in the coefficient matrix after the "real" cells
+	if(neumannOutlet == true){
+	cerr << "in here!";  
+	FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles){
+	  for (unsigned int ngbvertex = 0; ngbvertex<4;ngbvertex++){
+	  if(cell->vertex(ngbvertex)->info().id() == bcid2 && alreadydone == false){
+	    //Diagonal coefficient = 1 
+	  tripletList2.push_back(ETriplet2((ncells + outletcount),(ncells + outletcount),1.0));
+	  tripletList2.push_back(ETriplet2((ncells + outletcount),cell->info().id,-1.0));
+	 // cerr << endl<< "imaginary cell "<<(ncells + outletcount)<<" = "<<cell->info().id;
+	  outletcount += 1;
+	  //cerr << endl << "outletcount = "<<outletcount;
+	  alreadydone = true;
+	  }   
+	}
+	alreadydone = false;
+	}
+	}
+
+	
+	
 	
 	//Solve the coefficient Matrix
 	Aconc.setFromTriplets(tripletList2.begin(), tripletList2.end());
@@ -233,9 +292,9 @@ void SoluteFlowEngine::soluteBC()
 			if (cell->vertex(ngb)->info().id() == bcid1){
 			  cell->info().solute() = bcconcentration1;
 			}
-			if (D != 0){if (cell->vertex(ngb)->info().id() == bcid2){
-			cell->info().solute() = bcconcentration2;			  
-			}}
+			//if (D != 0 && bcid2s && neumannOutlet == false){if (cell->vertex(ngb)->info().id() == bcid2){
+			//cell->info().solute() = bcconcentration2;			  
+			//}}
 			  
 		}
 	}
