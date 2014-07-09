@@ -102,6 +102,7 @@ void SoluteFlowEngine::SoluteAction(){
       InitializeSoluteTransport();
       solveSoluteTransportMatrix();
       firstSoluteEngine=false;
+      massIntegrationStorage();
       if(localDebug){cerr<<"First time in solute Engine!"<<endl;}
   }
   
@@ -329,9 +330,9 @@ double SoluteFlowEngine::checkMassBalance()
 {
   double percentage = 0.0;
   double temp = 0.0;
-  temp = massIntegrationStorage() - massinBC + totalmassBCout;
-  percentage = 100.00*(temp - totalmassBCin)/temp;
-  return percentage;
+  temp = massIntegrationStorage()-massinBC -(abs(totalmassBCin) - abs(totalmassBCout));
+  percentage = 100.00*temp/(abs(totalmassBCin) - abs(totalmassBCout));
+  return (temp);
 }
 
 
@@ -349,11 +350,11 @@ void SoluteFlowEngine::massIntegrationBC()
 	{
 	for (unsigned int vertexngb=0;vertexngb<4;vertexngb++){ 
 	if (cell->vertex(vertexngb)->info().id() == bcid1 && alreadydone == false){
-			 massinBC += bcconcentration1*(abs(cell->info().volume()) - abs(solver->volumeSolidPore(cell)));
+			 massinBC += bcconcentration1/cell->info().invVoidVolume();
 			 for (unsigned int ngb=0;ngb<4;ngb++){
 			 q = (cell->info().kNorm() [ngb])* ( cell->neighbor ( ngb )->info().p()-cell->info().p());
 			 qin=abs(min(0.0,q));
-			 flux += qin*cell->info().solute()*scene->dt;
+			 flux += qin*bcconcentration1*scene->dt;
 			 }
 			 alreadydone = true;
 			
@@ -385,7 +386,7 @@ double SoluteFlowEngine::massIntegrationStorage()
   double mass = 0.0;
   FOREACH(CellHandle& cell, solver->T[solver->currentTes].cellHandles)
 	{
-	 mass += cell->info().solute()*(abs(cell->info().volume()) - abs(solver->volumeSolidPore(cell)));
+	 mass += cell->info().solute()/cell->info().invVoidVolume();
 	}
   return mass;
 }
