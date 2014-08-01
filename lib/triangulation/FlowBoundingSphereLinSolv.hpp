@@ -30,8 +30,6 @@ extern "C" {
 
 ///_____ Declaration ____
 
-using namespace std;
-
 namespace CGT {
 
 template<class _Tesselation, class FlowType=FlowBoundingSphere<_Tesselation> >
@@ -54,6 +52,7 @@ public:
 	using FlowType::pressureChanged;
 	using FlowType::computedOnce;
 	using FlowType::resetNetwork;
+	using FlowType::tesselation;
 
 	//! TAUCS DECs
 	vector<FiniteCellsIterator> orderedCells;
